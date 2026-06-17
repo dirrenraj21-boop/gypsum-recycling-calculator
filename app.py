@@ -11,33 +11,27 @@ from ortools.constraint_solver import pywrapcp
 st.set_page_config(page_title="Gypsum Recycling Dashboard", layout="wide")
 
 st.title("♻️ Gypsum Recycling Dashboard")
-st.caption("Profit-based route optimisation using free OSRM + OR-Tools")
+st.caption("Profit-maximising gypsum collection dashboard using free OSRM + OR-Tools")
 
 with st.sidebar:
     st.header("Input Parameters")
-    processing_cost_perkg = st.number_input("Processing cost (RM/kg)", min_value=0.0, value=10.0)
-    pot_weight = st.number_input("Pot weight (g)", min_value=1.0, value=70.0)
-    selling_price = st.number_input("Selling price per pot (RM)", min_value=0.0, value=5.0)
+    processing_cost_perkg = st.number_input("Processing cost (RM/kg)", 0.0, 1000.0, 10.0)
+    pot_weight = st.number_input("Pot weight (g)", 1.0, 1000.0, 70.0)
+    selling_price = st.number_input("Selling price per pot (RM)", 0.0, 1000.0, 5.0)
 
     st.header("Transport Parameters")
-    fuel_price = st.number_input("Fuel Price (RM/L)", min_value=0.0, value=2.05, step=0.01)
-    fuel_efficiency = st.number_input("Vehicle Fuel Efficiency (km/L)", min_value=1.0, value=12.0, step=0.5)
+    fuel_price = st.number_input("Fuel Price (RM/L)", 0.0, 100.0, 2.05, step=0.01)
+    fuel_efficiency = st.number_input("Vehicle Fuel Efficiency (km/L)", 1.0, 50.0, 12.0, step=0.5)
 
-    st.header("Carbon Emission Parameters")
-    virgin_carbon_factor = st.number_input("Virgin Gypsum Carbon Factor (kg CO₂e/kg)", min_value=0.0, value=0.30, step=0.01)
-    reduction_percent = st.number_input("CO₂ Reduction Compared With Virgin Gypsum (%)", min_value=0, max_value=100, value=45) / 100
+    st.header("Carbon Parameters")
+    virgin_carbon_factor = st.number_input("Virgin gypsum factor (kg CO₂e/kg)", 0.0, 10.0, 0.30, step=0.01)
+    reduction_percent = st.number_input("CO₂ reduction vs virgin gypsum (%)", 0, 100, 45) / 100
 
 yield_rate = 0.8791
 
-
 def get_osrm_table(points):
     coords = ";".join(f"{p['longitude']},{p['latitude']}" for p in points)
-
-    url = (
-        f"https://router.project-osrm.org/table/v1/driving/{coords}"
-        "?annotations=distance,duration"
-    )
-
+    url = f"https://router.project-osrm.org/table/v1/driving/{coords}?annotations=distance,duration"
     response = requests.get(url, timeout=20)
     data = response.json()
 
@@ -48,10 +42,7 @@ def get_osrm_table(points):
 
 
 def solve_tsp_for_subset(distance_matrix, subset_indices):
-    submatrix = [
-        [distance_matrix[i][j] for j in subset_indices]
-        for i in subset_indices
-    ]
+    submatrix = [[distance_matrix[i][j] for j in subset_indices] for i in subset_indices]
 
     manager = pywrapcp.RoutingIndexManager(len(submatrix), 1, 0)
     routing = pywrapcp.RoutingModel(manager)
@@ -85,13 +76,12 @@ def solve_tsp_for_subset(distance_matrix, subset_indices):
         total_distance += routing.GetArcCostForVehicle(previous_index, index, 0)
 
     route_local.append(0)
-
     route_global = [subset_indices[i] for i in route_local]
 
     return route_global, total_distance
 
 
-st.subheader("🏥 Clinic Collection Planner")
+st.header("🏥 Clinic Collection Planner")
 
 clinic_data = pd.DataFrame({
     "Include": [True, True, True, False, False, False, False, False, False, False],
@@ -116,11 +106,7 @@ clinic_data = st.data_editor(
     clinic_data,
     column_config={
         "Include": st.column_config.CheckboxColumn("Consider for collection"),
-        "Gypsum Available (kg)": st.column_config.NumberColumn(
-            "Gypsum Available (kg)",
-            min_value=0.0,
-            step=0.5
-        )
+        "Gypsum Available (kg)": st.column_config.NumberColumn("Gypsum Available (kg)", min_value=0.0, step=0.5)
     },
     hide_index=True,
     use_container_width=True
@@ -159,22 +145,16 @@ if len(candidate_clinics) > 0:
             for subset in combinations(clinic_indices, r):
                 subset_indices = [0] + list(subset)
 
-                route_indices, total_meters = solve_tsp_for_subset(
-                    distance_matrix,
-                    subset_indices
-                )
+                route_indices, total_meters = solve_tsp_for_subset(distance_matrix, subset_indices)
 
                 if not route_indices:
                     continue
 
-                selected_rows = candidate_clinics.iloc[
-                    [i - 1 for i in subset]
-                ]
+                selected_rows = candidate_clinics.iloc[[i - 1 for i in subset]]
 
                 gypsum_subset = selected_rows["Gypsum Available (kg)"].sum()
                 recovered_subset = gypsum_subset * yield_rate
                 pots_subset = (recovered_subset * 1000) / pot_weight if pot_weight > 0 else 0
-
                 revenue_subset = pots_subset * selling_price
                 processing_subset = gypsum_subset * processing_cost_perkg
 
@@ -184,62 +164,63 @@ if len(candidate_clinics) > 0:
 
                 profit_subset = revenue_subset - processing_subset - transport_subset
 
-                if profit_subset > best_profit:
+                if profit_subset <= 0:
+                    continue
+
+                if profit_subset > best_profit or (
+                    profit_subset == best_profit and total_meters < best_distance_m
+                ):
                     best_profit = profit_subset
                     best_route_indices = route_indices
                     best_selected_indices = list(subset)
                     best_distance_m = total_meters
 
-        route_order = [points[i]["Clinic"] for i in best_route_indices]
+        if best_route_indices:
+            route_order = [points[i]["Clinic"] for i in best_route_indices]
 
-        distance_km = best_distance_m / 1000
-        fuel_used = distance_km / fuel_efficiency if fuel_efficiency > 0 else 0
-        transport_cost = fuel_used * fuel_price
+            distance_km = best_distance_m / 1000
+            fuel_used = distance_km / fuel_efficiency if fuel_efficiency > 0 else 0
+            transport_cost = fuel_used * fuel_price
 
-        duration_seconds = 0
+            duration_seconds = 0
 
-        for i in range(len(best_route_indices) - 1):
-            origin_index = best_route_indices[i]
-            destination_index = best_route_indices[i + 1]
+            for i in range(len(best_route_indices) - 1):
+                origin_index = best_route_indices[i]
+                destination_index = best_route_indices[i + 1]
 
-            duration_seconds += duration_matrix[origin_index][destination_index]
+                duration_seconds += duration_matrix[origin_index][destination_index]
 
-            origin = points[origin_index]
-            destination = points[destination_index]
+                origin = points[origin_index]
+                destination = points[destination_index]
 
-            coords = (
-                f"{origin['longitude']},{origin['latitude']};"
-                f"{destination['longitude']},{destination['latitude']}"
-            )
+                coords = (
+                    f"{origin['longitude']},{origin['latitude']};"
+                    f"{destination['longitude']},{destination['latitude']}"
+                )
 
-            route_url = (
-                f"https://router.project-osrm.org/route/v1/driving/{coords}"
-                "?overview=full&geometries=geojson"
-            )
+                route_url = f"https://router.project-osrm.org/route/v1/driving/{coords}?overview=full&geometries=geojson"
 
-            try:
-                route_response = requests.get(route_url, timeout=20)
-                route_data = route_response.json()
+                try:
+                    route_response = requests.get(route_url, timeout=20)
+                    route_data = route_response.json()
 
-                if route_response.status_code == 200 and route_data.get("code") == "Ok":
-                    segment_coords = [
-                        [lat, lon]
-                        for lon, lat in route_data["routes"][0]["geometry"]["coordinates"]
-                    ]
-                    route_coordinates.extend(segment_coords)
+                    if route_response.status_code == 200 and route_data.get("code") == "Ok":
+                        segment_coords = [
+                            [lat, lon]
+                            for lon, lat in route_data["routes"][0]["geometry"]["coordinates"]
+                        ]
+                        route_coordinates.extend(segment_coords)
 
-            except:
-                pass
+                except Exception as e:
+                    st.warning(f"OSRM route error: {e}")
 
-        duration_min = duration_seconds / 60
+            duration_min = duration_seconds / 60
 
     else:
         st.error("OSRM could not calculate the distance matrix. Try again later.")
 
 if best_selected_indices:
-    selected_route_df = candidate_clinics.iloc[
-        [i - 1 for i in best_selected_indices]
-    ].copy()
+    selected_route_df = candidate_clinics.iloc[[i - 1 for i in best_selected_indices]].copy()
 else:
     selected_route_df = pd.DataFrame(columns=candidate_clinics.columns)
 
@@ -261,7 +242,7 @@ col5.metric("📈 Profit", f"RM {profit:.2f}")
 col6.metric("🌱 CO₂ Reduction", f"{carbon_saved:.2f} kg CO₂e")
 
 st.caption(
-    "The model tests possible clinic combinations, selects the most profitable collection set, then optimises the shortest route using OSRM + OR-Tools."
+    "The model tests clinic combinations, selects the most profitable collection set, then optimises the shortest route using free OSRM + OR-Tools."
 )
 
 st.divider()
@@ -314,14 +295,7 @@ chart_data = pd.DataFrame({
     "RM": [revenue, processing_cost, transport_cost, profit]
 })
 
-fig = px.bar(
-    chart_data,
-    x="Category",
-    y="RM",
-    text="RM",
-    title="Cost and Revenue Breakdown"
-)
-
+fig = px.bar(chart_data, x="Category", y="RM", text="RM", title="Cost and Revenue Breakdown")
 fig.update_traces(texttemplate="RM %{y:.2f}", textposition="outside")
 fig.update_layout(xaxis_title="", yaxis_title="RM", showlegend=False)
 
